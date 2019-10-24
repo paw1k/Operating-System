@@ -1,0 +1,314 @@
+#include <iostream>
+#include <unistd.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <stdio.h>
+
+using namespace std;
+
+#define TOTAL_USER_REQUESTS 	256
+
+class UserRequest
+{
+	int nUser;
+	int nGroup;
+	int pos;
+	int reqArrivalTime;
+	int reqDurationTime;
+	public:
+		UserRequest() 
+		{
+			nUser = 0; nGroup = 0; pos = 0;
+			reqArrivalTime = 0; reqDurationTime = 0;
+		}
+		int getUserNumber() { return nUser; }
+		int getGroupNumber() { return nGroup; }
+		int getPosition() { return pos; }
+		int getReqArrivalTime() { return reqArrivalTime; }
+		int getReqDurationTime() { return reqDurationTime; }
+		int setUserNumber(int user) { nUser = user; }
+		int setGroupNumber (int group) { nGroup = group; }
+		int setPosition(int p) { pos = p; }
+		int setReqArivalTime(int t) { reqArrivalTime = t;}
+		int setReqDurationTime(int t) { reqDurationTime = t; }
+};
+UserRequest userReq[TOTAL_USER_REQUESTS];
+
+#define MAX		10
+
+class DBPriv
+{
+	public:	
+		int		DBMSuser[MAX];
+		sem_t		sem[MAX];
+		pthread_mutex_t 	lock;
+		pthread_cond_t		cond;
+};
+DBPriv	dbPriv;
+
+class DBStats
+{
+	public:
+		int firstAccessGroup;
+		int firstGroupCount;
+		int secondGroupCount;
+		int firstGroupCompletedCount;
+		int secondGroupCompletedCount;
+		int reqWaitDueToGroup;
+		int reqWaitDueToLockPos; 
+};
+DBStats dbStats;
+
+void initLocks()        //initializing semaphore and mutex locks
+{
+	
+	for (int i = 0; i < MAX; i++)
+		sem_init(&dbPriv.sem[i], 0, 1);
+
+
+	pthread_mutex_init(&dbPriv.lock, NULL);
+}
+
+void destroyLocks()
+{
+	
+	for (int i = 0; i < MAX; i++)
+		sem_destroy(&dbPriv.sem[i]);
+
+	
+	pthread_mutex_destroy(&dbPriv.lock);
+}
+
+int getStartingGroup()
+{
+	char *str = NULL;
+	size_t len;
+	int groupNum;
+
+	
+	if (getline(&str, &len, stdin) == -1)	// gets first line of the file
+		return -1;
+	else {
+		groupNum = atoi(str);
+		free(str);
+	}
+	return groupNum;
+
+}
+
+int recordDBMSRequests()
+{
+	char *line = NULL, *ptr = NULL;
+	size_t length;
+	char s[256] = {0};
+	int userNum = 0;
+	int group = 0;
+	int count = 0;
+	
+	
+	while (getline(&line, &length, stdin) != -1)   //while file has nextline, gets line and info is gathered according to parameter 
+	{
+		line[std::strlen(line)] = '\0';
+		std::memset(s, 0, 256);
+		std::memcpy(s, line, std::strlen(line));
+	
+		
+		userReq[count].setUserNumber(++userNum);
+	
+		
+		ptr = std::strtok(s, " ");
+		group = atoi(ptr);
+		userReq[count].setGroupNumber(group);
+
+		
+		if (group == 1)
+		{
+			dbStats.firstGroupCount++;                //checking updates
+			dbStats.firstGroupCompletedCount++;	
+		}
+		else if (group == 2)
+		{
+			dbStats.secondGroupCount++;
+			dbStats.secondGroupCompletedCount++;
+		}
+
+		
+		ptr = std::strtok(NULL, " ");		
+		userReq[count].setPosition(atoi(ptr));    //getting correct positioning 
+
+		
+		ptr = std::strtok(NULL, " ");		
+		userReq[count].setReqArivalTime(atoi(ptr));
+
+		
+		ptr = std::strtok(NULL, " ");
+		userReq[count].setReqDurationTime(atoi(ptr));	
+		
+		count++;
+	}
+
+	
+	std::free(line);	//deletes lines
+	return count;		
+} 
+
+int noMemberInStartGroup = 0;
+
+int checkStartGroupStatus()
+{
+	
+	pthread_mutex_lock(&dbPriv.lock);
+	if ((dbStats.firstGroupCount == 0) && (dbStats.firstAccessGroup == 1)) 
+	{
+		if (!noMemberInStartGroup)          //checking if we get request otherwise moving on
+		{
+			cout << endl << "All users from Group1 finished their execution" << endl << std::flush;
+			cout << "The users from Group2 start their execution" << endl << endl << std::flush;
+			noMemberInStartGroup = 1;
+		}
+	}
+	else if ((dbStats.secondGroupCount == 0) && (dbStats.firstAccessGroup == 2))
+	{
+		if (!noMemberInStartGroup)
+		{
+			cout << endl << "All users from Group2 finished their execution" << endl << std::flush;
+			cout << "The users from Group1 start their execution" << endl << endl << std::flush;
+			noMemberInStartGroup = 1;
+		}	
+	}
+	pthread_mutex_unlock(&dbPriv.lock);
+}
+
+int flagGroupCompletion = 0;
+int signalOnStartGroupCompletion()
+{
+	
+	if ((dbStats.firstGroupCount != 0) && (dbStats.firstGroupCompletedCount == 0) && (dbStats.firstAccessGroup == 1)) {
+		int i = 0;
+		if (!flagGroupCompletion) {
+			cout << endl << "All users from Group 1 finished their execution" << endl << std::flush;
+			cout << "The users from Group 2 start their execution" << endl << endl << std::flush;
+			flagGroupCompletion = 1;
+		}
+		while (i++ < dbStats.secondGroupCompletedCount) 
+			pthread_cond_signal(&dbPriv.cond);
+	} else if ((dbStats.secondGroupCount != 0) && (dbStats.secondGroupCompletedCount == 0) && (dbStats.firstAccessGroup == 2)) {
+		int i = 0;
+		if (!flagGroupCompletion) {
+			fprintf(stdout, "\nAll users from Group 2 finished their execution\n");
+			fprintf(stdout, "The users from Group 1 start their execution\n\n"); 
+			flagGroupCompletion = 1;
+		}
+		while (i++ < dbStats.firstGroupCompletedCount) 
+			pthread_cond_signal(&dbPriv.cond);
+	}
+}
+
+void *dbHandler(void *arg)
+{
+	UserRequest *ptrUserRequest = (UserRequest *)arg;
+	
+	
+	checkStartGroupStatus();
+	
+	
+	pthread_mutex_lock(&dbPriv.lock);
+	cout << "User " << ptrUserRequest->getUserNumber() << " from Group " << ptrUserRequest->getGroupNumber() << " arrives to the DBMS" << endl << std::flush;
+	if (((dbStats.firstAccessGroup == 2) && (dbStats.secondGroupCompletedCount != 0)) ||
+	    ((dbStats.firstAccessGroup == 1) && (dbStats.firstGroupCompletedCount != 0)))
+	{
+		if (ptrUserRequest->getGroupNumber() != dbStats.firstAccessGroup)
+		{
+			cout << "User " << ptrUserRequest->getUserNumber() << " is waiting due to its group" << endl << std::flush;
+			dbStats.reqWaitDueToGroup++;
+			pthread_cond_wait(&dbPriv.cond, &dbPriv.lock);	
+		}
+	}
+	pthread_mutex_unlock(&dbPriv.lock);
+
+	                                                                      
+	if (sem_trywait(&dbPriv.sem[ptrUserRequest->getPosition() - 1]) == -1) // getting record
+	{
+		cout << "User " << ptrUserRequest->getUserNumber() << " is waiting: position " << ptrUserRequest->getPosition() << " of the database is being used by user " << dbPriv.DBMSuser[ptrUserRequest->getPosition() - 1] << endl << std::flush; 
+		dbStats.reqWaitDueToLockPos++;
+		while (sem_trywait(&dbPriv.sem[ptrUserRequest->getPosition() - 1]) < 0) {
+		}
+	} 
+
+	
+	pthread_mutex_lock(&dbPriv.lock);
+	cout << "User " << ptrUserRequest->getUserNumber() << " is accessing the position " << ptrUserRequest->getPosition() << " of the database for "  << ptrUserRequest->getReqDurationTime() << " second(s)" << endl << std::flush;
+	dbPriv.DBMSuser[ptrUserRequest->getPosition() - 1] = ptrUserRequest->getUserNumber();
+	pthread_mutex_unlock(&dbPriv.lock);	
+
+	
+	sleep(ptrUserRequest->getReqDurationTime());  //sleep for certain period
+
+	
+	pthread_mutex_lock(&dbPriv.lock);
+	cout << "User " << ptrUserRequest->getUserNumber() << " finished its execution" << endl << std::flush;
+
+	
+	if (ptrUserRequest->getGroupNumber() == 1) 
+		dbStats.firstGroupCompletedCount--;
+	else if (ptrUserRequest->getGroupNumber() == 2)
+		dbStats.secondGroupCompletedCount--;
+
+	dbPriv.DBMSuser[ptrUserRequest->getPosition() - 1] = 0;
+
+	
+	signalOnStartGroupCompletion();
+	
+	//release semaphore
+	sem_post(&dbPriv.sem[ptrUserRequest->getPosition() - 1]);
+	pthread_mutex_unlock(&dbPriv.lock);	 
+}
+
+int main()
+{
+	int count; 
+
+	//initialize database locks
+	initLocks();
+
+	//get first access allowed group
+	dbStats.firstAccessGroup = getStartingGroup();
+	if (dbStats.firstAccessGroup == -1)
+	{
+		cout << "Wrong input file format!, Exiting" << endl << std::flush;
+		destroyLocks();
+		return -1;
+	}
+
+	//read input file and get DB requests
+	count = recordDBMSRequests();
+
+	// create threads one after the other as per arrival time
+	pthread_t tid[256];
+
+	for (int i = 0; i < count; i++) 
+	{
+		if (userReq[i].getReqArrivalTime() != 0)
+			sleep(userReq[i].getReqArrivalTime());
+	
+		pthread_create(&tid[i], NULL, dbHandler, &userReq[i]); 
+	}
+
+	// wait for threads
+	for (int i = 0; i < count; i++)
+	{
+		pthread_join(tid[i], NULL);
+	}
+
+	cout << endl << "Total Requests: " << endl;
+	cout << "\t" << "Group 1: " << dbStats.firstGroupCount << endl << std::flush;
+	cout << "\t" << "Group 2: " << dbStats.secondGroupCount << endl << std::flush;
+	cout << endl << "Requests that waited: " << endl << std::flush;
+	cout << "\t" << "Due to its group: " << dbStats.reqWaitDueToGroup << endl << std::flush;
+	cout << "\t" << "Due to a locked position: " << dbStats.reqWaitDueToLockPos << endl << std::flush;
+	
+	return 0;
+}
